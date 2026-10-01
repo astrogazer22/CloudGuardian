@@ -1,0 +1,46 @@
+{{- define "cg.apiJob" -}}
+{{- $root := index . 0 -}}{{- $job := index . 1 -}}{{- $hook := index . 2 -}}{{- $cmd := index . 3 -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cg.name" $root }}-{{ $job }}
+  labels:
+    {{- include "cg.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $job }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "cg.labels" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $job }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- include "cg.podSecurity" $root | nindent 6 }}
+      containers:
+        - name: {{ $job }}
+          image: {{ include "cg.image" (list $root $root.Values.api.repository) }}
+          imagePullPolicy: {{ $root.Values.imagePullPolicy }}
+          {{- include "cg.containerSecurity" $root | nindent 10 }}
+          command: {{ toJson $cmd }}
+          {{- include "cg.apiEnv" $root | nindent 10 }}
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 768Mi }
+{{- end -}}
+
+{{- if .Values.migrations.enabled }}
+# Runs before the new API pods roll out, against the DB in the Terraform-managed secret.
+{{ include "cg.apiJob" (list . "migrate" "pre-install,pre-upgrade" (list "npx" "prisma" "migrate" "deploy" "--schema" "prisma/schema.prisma")) }}
+{{- end }}
+{{- if .Values.seed.enabled }}
+---
+{{ include "cg.apiJob" (list . "seed" "post-install,post-upgrade" (list "npx" "tsx" "prisma/seed.ts")) }}
+{{- end }}

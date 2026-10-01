@@ -1,0 +1,54 @@
+# ECR registry host, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com (set by CI).
+imageRegistry: ""
+imageTag: latest
+imagePullPolicy: IfNotPresent
+
+# Public hostname (optional). Empty = use the ALB DNS name over HTTP.
+host: ""
+
+api:
+  repository: cloudguardian/api
+  # Keep at 1 for now: each replica also runs the BullMQ workers and cron jobs.
+  replicas: 1
+  # Created by Terraform (modules/app-runtime): DATABASE_URL, JWT_SECRET, REDIS_URL, REDIS_PASSWORD, ...
+  existingSecret: cloudguardian-api
+  env:
+    AWS_REGION: us-east-1
+    AWS_STS_REGION: us-east-1
+    RUN_WORKERS: "true"
+    AUTO_TICKETS: "true"
+    AWS_SYNC_CRON: "0 */6 * * *"
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 768Mi }
+
+web:
+  repository: cloudguardian/web
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 384Mi }
+
+redis:
+  image: redis:7.4-alpine
+  # Queue/cache only; data is not persisted (jobs are re-created by cron).
+  maxmemory: 100mb
+  resources:
+    requests: { cpu: 25m, memory: 48Mi }
+    limits: { memory: 160Mi }
+
+ingress:
+  enabled: true
+  className: alb
+  scheme: internet-facing
+  # Shared ALB group: add more Ingresses with the same group name to reuse one ALB (~$16/mo each saved).
+  groupName: cloudguardian
+  # ACM certificate ARN for HTTPS. Empty = HTTP only.
+  certificateArn: ""
+
+migrations:
+  enabled: true
+
+# Loads demo users/tickets with well-known passwords. Only for first-time evaluation.
+seed:
+  enabled: false

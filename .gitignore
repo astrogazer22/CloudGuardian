@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.next/
+out/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+.next-verify/
+
+# Terraform (commit .terraform.lock.hcl)
+.terraform/
+*.tfstate
+*.tfstate.*
+plan.cache
+*.tfvars

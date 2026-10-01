@@ -1,0 +1,8 @@
+CloudGuardian {{ .Values.imageTag }} deployed to namespace {{ .Release.Namespace }}.
+
+ALB address (may take ~2 minutes to provision):
+  kubectl -n {{ .Release.Namespace }} get ingress {{ include "cg.name" . }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+{{- with include "cg.publicUrl" . }}
+
+Point DNS for {{ $.Values.host }} at that hostname, then open {{ . }}
+{{- end }}

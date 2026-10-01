@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+**/.next
+**/.next-*
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+!**/.env.example
+.git
+.gitlab-ci.yml
+infra
+deploy
+docker-compose.yml
+*.md

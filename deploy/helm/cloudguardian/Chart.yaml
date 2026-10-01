@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cloudguardian
+description: CloudGuardian CRM (NestJS API + Next.js web + Redis) on EKS behind one ALB
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,230 @@
+# CloudGuardian: build containers, manage AWS infra with Terraform, deploy to EKS with Helm.
+#
+# Required CI/CD variables (Settings → CI/CD → Variables):
+#   AWS_ROLE_ARN          output `ci_role_arn` of infra/terraform/bootstrap (mark Protected)
+# Optional:
+#   APP_HOST              public hostname, e.g. crm.example.com (point DNS at the ALB)
+#   ACM_CERTIFICATE_ARN   ACM cert for APP_HOST → enables HTTPS on the ALB
+#   TF_VAR_admin_principal_arns  e.g. ["arn:aws:iam::123456789012:role/Admin"] for kubectl access
+#
+# MRs run checks only. The default branch builds/pushes images, plans Terraform
+# (apply is a manual button) and deploys with Helm.
+
+stages: [validate, infra, build, deploy]
+
+variables:
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: ${AWS_REGION}
+  PROJECT: cloudguardian
+  ENVIRONMENT: prod
+  CLUSTER_NAME: ${PROJECT}-${ENVIRONMENT}
+  K8S_NAMESPACE: ${PROJECT}
+  IMAGE_TAG: ${CI_COMMIT_SHORT_SHA}
+  TF_ROOT: infra/terraform/environments/prod
+  TF_IMAGE: hashicorp/terraform:1.13
+  HELM_VERSION: "4.2.4"
+  NODE_IMAGE: node:22-bookworm-slim
+  # GitLab-managed Terraform state (Operate → Terraform states)
+  TF_HTTP_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${ENVIRONMENT}
+  TF_HTTP_LOCK_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${ENVIRONMENT}/lock
+  TF_HTTP_UNLOCK_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${ENVIRONMENT}/lock
+  TF_HTTP_LOCK_METHOD: POST
+  TF_HTTP_UNLOCK_METHOD: DELETE
+  TF_HTTP_USERNAME: gitlab-ci-token
+  TF_HTTP_PASSWORD: ${CI_JOB_TOKEN}
+  TF_HTTP_RETRY_WAIT_MIN: "5"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_region: ${AWS_REGION}
+  TF_VAR_project: ${PROJECT}
+  TF_VAR_environment: ${ENVIRONMENT}
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── Shared snippets ─────────────────────────────────────────────────────────
+
+# Short-lived AWS credentials via GitLab OIDC → sts:AssumeRoleWithWebIdentity.
+# AWS CLI, SDKs and Terraform all read AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE.
+.aws:
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: sts.amazonaws.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+.aws_login: &aws_login
+  - test -n "$AWS_ROLE_ARN" || { echo "Set the AWS_ROLE_ARN CI/CD variable (see infra/terraform/bootstrap)"; exit 1; }
+  - echo "$GITLAB_OIDC_TOKEN" > /tmp/web-identity-token
+  - export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/web-identity-token
+  - export AWS_ROLE_SESSION_NAME="gitlab-${CI_PROJECT_ID}-${CI_JOB_ID}"
+
+.terraform:
+  image:
+    name: ${TF_IMAGE}
+    entrypoint: [""]
+  cache:
+    key: terraform-${CI_COMMIT_REF_SLUG}
+    paths: ["${TF_ROOT}/.terraform/providers"]
+
+.helm_install: &helm_install
+  - curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" | tar -xz -C /tmp
+  - install /tmp/linux-amd64/helm /usr/local/bin/helm
+
+# ─── validate ────────────────────────────────────────────────────────────────
+
+app:typecheck:
+  stage: validate
+  image: ${NODE_IMAGE}
+  needs: []
+  cache:
+    key: npm-${CI_COMMIT_REF_SLUG}
+    paths: [.npm/]
+  script:
+    - npm ci --cache .npm --prefer-offline --no-audit --no-fund
+    - npx prisma generate --schema apps/api/prisma/schema.prisma
+    - npm run typecheck -w @cg/api
+    - NEXT_PUBLIC_API_URL=/api npm run build -w @cg/web # next build typechecks and generates next-env.d.ts
+
+terraform:validate:
+  extends: .terraform
+  stage: validate
+  needs: []
+  script:
+    - terraform fmt -check -recursive -diff infra/terraform
+    - |
+      for dir in infra/terraform/bootstrap ${TF_ROOT}; do
+        echo "── $dir"
+        terraform -chdir=$dir init -backend=false -input=false
+        terraform -chdir=$dir validate
+      done
+
+helm:lint:
+  stage: validate
+  image: alpine:3.22
+  needs: []
+  before_script:
+    - apk add --no-cache curl tar
+    - *helm_install
+  script:
+    - helm lint deploy/helm/cloudguardian --set imageRegistry=example.dkr.ecr.us-east-1.amazonaws.com
+    - helm template cloudguardian deploy/helm/cloudguardian --set host=example.com > /dev/null
+
+# ─── infra (default branch) ──────────────────────────────────────────────────
+
+terraform:plan:
+  extends: [.terraform, .aws]
+  stage: infra
+  needs: ["terraform:validate"]
+  resource_group: terraform-${ENVIRONMENT}
+  script:
+    - *aws_login
+    - cd ${TF_ROOT}
+    - terraform init -input=false
+    - terraform plan -input=false -out=plan.cache
+    - terraform show -no-color plan.cache | tail -n 3
+  artifacts:
+    name: plan
+    paths: ["${TF_ROOT}/plan.cache", "${TF_ROOT}/.terraform.lock.hcl"]
+    expire_in: 1 week
+    access: developer
+
+terraform:apply:
+  extends: [.terraform, .aws]
+  stage: infra
+  needs: ["terraform:plan"]
+  resource_group: terraform-${ENVIRONMENT}
+  environment:
+    name: ${ENVIRONMENT}-infra
+    action: prepare
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true # infra changes are optional; image deploys keep flowing
+  script:
+    - *aws_login
+    - cd ${TF_ROOT}
+    - terraform init -input=false
+    - terraform apply -input=false plan.cache
+
+# ─── build (default branch) ──────────────────────────────────────────────────
+
+.build_image:
+  extends: .aws
+  stage: build
+  needs: ["app:typecheck"]
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - apk add --no-cache aws-cli
+    - *aws_login
+    - export REGISTRY="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+  script:
+    - IMAGE="${REGISTRY}/${PROJECT}/${APP}"
+    - docker pull "${IMAGE}:latest" || true
+    - >
+      docker build
+      --file apps/${APP}/Dockerfile
+      --cache-from "${IMAGE}:latest"
+      --build-arg BUILDKIT_INLINE_CACHE=1
+      --label org.opencontainers.image.revision=${CI_COMMIT_SHA}
+      --tag "${IMAGE}:${IMAGE_TAG}"
+      --tag "${IMAGE}:latest"
+      .
+    - docker push "${IMAGE}:${IMAGE_TAG}"
+    - docker push "${IMAGE}:latest"
+
+build:api:
+  extends: .build_image
+  variables:
+    APP: api
+
+build:web:
+  extends: .build_image
+  variables:
+    APP: web
+
+# ─── deploy (default branch) ─────────────────────────────────────────────────
+
+.helm_deploy:
+  extends: .aws
+  stage: deploy
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  resource_group: deploy-${ENVIRONMENT}
+  before_script:
+    - yum install -y -q tar gzip >/dev/null
+    - *helm_install
+    - *aws_login
+    - aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+    - export REGISTRY="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - export HELM_ARGS="--namespace ${K8S_NAMESPACE} --set imageRegistry=${REGISTRY} --set imageTag=${IMAGE_TAG} --set-string host=${APP_HOST:-} --set-string ingress.certificateArn=${ACM_CERTIFICATE_ARN:-} --set api.env.AWS_REGION=${AWS_REGION} --set api.env.AWS_STS_REGION=${AWS_REGION}"
+
+deploy:
+  extends: .helm_deploy
+  needs: ["build:api", "build:web"]
+  environment:
+    name: ${ENVIRONMENT}
+  script:
+    - helm upgrade --install ${PROJECT} deploy/helm/cloudguardian ${HELM_ARGS} --wait --timeout 10m --rollback-on-failure
+    - helm status ${PROJECT} --namespace ${K8S_NAMESPACE}
+
+# One-off: load demo users/tickets (well-known passwords!). Change them after seeding.
+seed:demo-data:
+  extends: .helm_deploy
+  needs: ["deploy"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+  script:
+    - helm upgrade ${PROJECT} deploy/helm/cloudguardian ${HELM_ARGS} --set seed.enabled=true --wait --timeout 10m

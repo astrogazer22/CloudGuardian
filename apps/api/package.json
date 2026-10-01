@@ -1,0 +1,50 @@
+{
+  "name": "@cg/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "prisma generate && nest build",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:reset": "prisma migrate reset --force"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-backup": "^3.700.0",
+    "@aws-sdk/client-cloudwatch": "^3.700.0",
+    "@aws-sdk/client-ec2": "^3.700.0",
+    "@aws-sdk/client-elastic-load-balancing-v2": "^3.700.0",
+    "@aws-sdk/client-iam": "^3.700.0",
+    "@aws-sdk/client-inspector2": "^3.700.0",
+    "@aws-sdk/client-sts": "^3.700.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/schedule": "^5.0.0",
+    "@prisma/client": "^6.2.0",
+    "bcryptjs": "^3.0.2",
+    "bullmq": "^5.34.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "dotenv": "^16.4.7",
+    "ioredis": "^5.4.2",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "prisma": "^6.2.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
