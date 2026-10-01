@@ -6,11 +6,13 @@
 #   APP_HOST              public hostname, e.g. crm.example.com (point DNS at the ALB)
 #   ACM_CERTIFICATE_ARN   ACM cert for APP_HOST → enables HTTPS on the ALB
 #   TF_VAR_admin_principal_arns  e.g. ["arn:aws:iam::123456789012:role/Admin"] for kubectl access
+#   SONAR_HOST_URL        e.g. https://sonarqube.example.com (enables the sonarqube job)
+#   SONAR_TOKEN           SonarQube project analysis token (Masked; leave unprotected so MRs can scan)
 #
 # MRs run checks only. The default branch builds/pushes images, plans Terraform
 # (apply is a manual button) and deploys with Helm.
 
-stages: [validate, infra, build, deploy]
+stages: [validate, test, infra, build, deploy]
 
 variables:
   AWS_REGION: us-east-1
@@ -114,6 +116,31 @@ helm:lint:
     - helm lint deploy/helm/cloudguardian --set imageRegistry=example.dkr.ecr.us-east-1.amazonaws.com
     - helm template cloudguardian deploy/helm/cloudguardian --set host=example.com > /dev/null
 
+# ─── test ────────────────────────────────────────────────────────────────────
+
+# Static analysis of TypeScript, Dockerfiles, Terraform and Kubernetes manifests.
+# Settings live in sonar-project.properties. A failed quality gate fails the job,
+# which blocks image builds and deploys on the default branch.
+sonarqube:
+  stage: test
+  image:
+    name: sonarsource/sonar-scanner-cli:11
+    entrypoint: [""]
+  needs: []
+  variables:
+    SONAR_USER_HOME: ${CI_PROJECT_DIR}/.sonar
+    GIT_DEPTH: "0" # full history for blame / new-code detection
+  cache:
+    key: sonar-${CI_JOB_NAME}
+    paths: [.sonar/cache]
+  rules:
+    - if: $SONAR_HOST_URL == null || $SONAR_TOKEN == null
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - sonar-scanner -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=300
+
 # ─── infra (default branch) ──────────────────────────────────────────────────
 
 terraform:plan:
@@ -156,7 +183,10 @@ terraform:apply:
 .build_image:
   extends: .aws
   stage: build
-  needs: ["app:typecheck"]
+  needs:
+    - job: app:typecheck
+    - job: sonarqube
+      optional: true # skipped when SonarQube variables are not set
   image: docker:27
   services:
     - docker:27-dind
